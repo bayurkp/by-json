@@ -1,5 +1,7 @@
 # ByJSON Specification
 
+> _Connected by JSON, structured ByJSON._
+
 A practical, balanced JSON standard for REST API responses and requests.
 
 ## What?
