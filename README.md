@@ -41,10 +41,20 @@ ByJSON sits in the middle: **structured enough to be predictable, simple enough 
   - [4.1 General Payload Structure](#41-general-payload-structure)
   - [4.2 Success Responses](#42-success-responses)
   - [4.3 Error Responses](#43-error-responses)
-- [5. Reference Tables](#5-reference-tables)
-  - [5.1 Error Code Reference](#51-error-code-reference)
-  - [5.2 Filter Operator Reference](#52-filter-operator-reference)
-  - [5.3 Meta Object Specification](#53-meta-object-specification)
+- [5. File Resources](#5-file-resources)
+  - [5.1 Resource Structure](#51-resource-structure)
+  - [5.2 Endpoints](#52-endpoints)
+  - [5.3 Presigned URL Model](#53-presigned-url-model)
+  - [5.4 Direct Upload Model](#54-direct-upload-model)
+  - [5.5 Attaching Files to Resources](#55-attaching-files-to-resources)
+  - [5.6 Validation & Policy](#56-validation--policy)
+  - [5.7 Routing Rules](#57-routing-rules)
+  - [5.8 Orphan Cleanup](#58-orphan-cleanup)
+  - [5.9 File Representation in Other Resources](#59-file-representation-in-other-resources)
+- [6. Reference Tables](#6-reference-tables)
+  - [6.1 Error Code Reference](#61-error-code-reference)
+  - [6.2 Filter Operator Reference](#62-filter-operator-reference)
+  - [6.3 Meta Object Specification](#63-meta-object-specification)
 - [License](#license)
 
 ---
@@ -611,24 +621,276 @@ Used for malformed requests, authentication, authorization, not found, or server
 }
 ```
 
-## 5. Reference Tables
+## 5. File Resources
 
-### 5.1 Error Code Reference
+Files — images, videos, documents, archives, or any binary type — are **first-class resources** represented under a single `/files` endpoint. They are differentiated by the `category` field (derived from `content_type`), not by separate endpoints.
 
-| Error Code            | HTTP Status | Description                                                   |
-| --------------------- | ----------- | ------------------------------------------------------------- |
-| `bad_request`         | 400         | The request body is malformed JSON and cannot be parsed.      |
-| `validation_error`    | 422         | The request data failed validation rules. See `details`.      |
-| `unauthorized`        | 401         | Authentication is required or the token has expired.          |
-| `forbidden`           | 403         | The authenticated user does not have permission.              |
-| `not_found`           | 404         | The requested resource does not exist.                        |
-| `method_not_allowed`  | 405         | The HTTP method is not supported for this endpoint.           |
-| `conflict`            | 409         | The request conflicts with the current state of the resource. |
-| `too_many_requests`   | 429         | The client has exceeded the rate limit.                       |
-| `internal_error`      | 500         | An unexpected server error occurred.                          |
-| `service_unavailable` | 503         | The server is temporarily unavailable.                        |
+**Key principles:**
 
-### 5.2 Filter Operator Reference
+- Upload never carries raw binary inside the main JSON envelope. JSON is only used for negotiation (request upload permission, complete upload, retrieve metadata). Binary transfer happens in a separate request, outside the JSON envelope.
+- File resources have their own lifecycle (`pending` → `completed` → `failed`/`expired`), independent of whichever resource will eventually reference them.
+
+**Two upload modes are supported.** The implementation team **MUST** choose one and document their choice. Both modes produce the same resource representation in responses — clients consuming data do not need to know which mode was used during upload.
+
+| Condition                                                                | Recommended Mode            |
+| ------------------------------------------------------------------------ | --------------------------- |
+| Large files, high volume, no need for synchronous server-side processing | Presigned URL (Section 5.3) |
+| Small files, need immediate validation/processing, simple monolith setup | Direct Upload (Section 5.4) |
+
+### 5.1 Resource Structure
+
+#### Fields
+
+| Field           | Type             | Description                                                                                |
+| --------------- | ---------------- | ------------------------------------------------------------------------------------------ |
+| `id`            | `string` (UUID)  | Unique file identifier                                                                     |
+| `status`        | `string`         | `pending`, `completed`, `failed`, `expired`                                                |
+| `filename`      | `string`         | Original filename from the client                                                          |
+| `content_type`  | `string`         | MIME type (e.g., `image/jpeg`, `application/pdf`)                                          |
+| `category`      | `string`         | Derived from `content_type` server-side: `image`, `video`, `document`, `archive`, `other`  |
+| `size_bytes`    | `integer`        | File size in bytes                                                                         |
+| `url`           | `string \| null` | Public/access URL for the file. `null` while status is `pending`                           |
+| `upload_url`    | `string \| null` | Destination URL for upload. Only present when `status = pending` (Presigned URL mode only) |
+| `upload_method` | `string \| null` | HTTP method for upload, typically `PUT` (Presigned URL mode only)                          |
+| `expires_at`    | `string \| null` | ISO 8601 expiration timestamp for `upload_url`. `null` after `status = completed`          |
+| `created_at`    | `string`         | ISO 8601 timestamp when the resource was created                                           |
+
+`id` uses UUID (not auto-increment integer) intentionally — this prevents collision with static path segments (see Section 5.7) and prevents files from being guessable or enumerable.
+
+#### Category Rules
+
+The server **MUST** determine `category` from `content_type`. The client must not send it manually.
+
+| `content_type` prefix/value                                                                | `category` |
+| ------------------------------------------------------------------------------------------ | ---------- |
+| `image/*`                                                                                  | `image`    |
+| `video/*`                                                                                  | `video`    |
+| `application/pdf`, `application/msword`, `application/vnd.openxmlformats-officedocument.*` | `document` |
+| `application/zip`, `application/x-rar-compressed`, `application/x-tar`                     | `archive`  |
+| anything else                                                                              | `other`    |
+
+### 5.2 Endpoints
+
+| Method   | Endpoint               | Description                                                                                                               |
+| -------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `POST`   | `/files`               | Register intent to upload a new file (creates resource with `status = pending`), or upload directly in Direct Upload mode |
+| `POST`   | `/files/{id}/complete` | Mark the upload as complete after binary transfer (Presigned URL mode only)                                               |
+| `GET`    | `/files/{id}`          | Retrieve metadata of a file                                                                                               |
+| `DELETE` | `/files/{id}`          | Delete a file (soft delete recommended)                                                                                   |
+
+All action endpoints (`/complete`) appear **after** `{id}`, never directly after the collection — this avoids routing ambiguity with `GET/DELETE /files/{id}` (see Section 5.7).
+
+### 5.3 Presigned URL Model
+
+A four-step flow where binary transfer is offloaded to a separate URL (object storage or a dedicated upload endpoint on the server itself).
+
+#### Step 1 — Register upload intent
+
+`POST /files`
+
+```json
+{
+  "filename": "nasi-goreng.jpg",
+  "content_type": "image/jpeg",
+  "size_bytes": 204800
+}
+```
+
+The server **MUST** validate `content_type` and `size_bytes` against policy (see Section 5.6) before generating `upload_url`.
+
+Response (`201 Created`):
+
+```json
+{
+  "data": {
+    "id": "9f1c2e3a-1b2c-4d5e-8f9a-0b1c2d3e4f5a",
+    "status": "pending",
+    "filename": "nasi-goreng.jpg",
+    "content_type": "image/jpeg",
+    "category": "image",
+    "size_bytes": 204800,
+    "url": null,
+    "upload_url": "https://storage.domain.com/uploads/9f1c2e3a...?signature=...",
+    "upload_method": "PUT",
+    "expires_at": "2026-07-10T09:15:00Z",
+    "created_at": "2026-07-10T09:00:00Z"
+  },
+  "error": null,
+  "meta": {
+    "request_id": "b3e1f2a4-5c6d-7e8f-9a0b-1c2d3e4f5a6b",
+    "timestamp": "2026-07-10T09:00:00Z"
+  }
+}
+```
+
+#### Step 2 — Upload binary
+
+The client sends the file directly to `upload_url` using `upload_method` (typically `PUT`, raw binary body — **not** `multipart/form-data`). This request is **outside** the ByJSON JSON envelope.
+
+The destination may be external object storage (S3, GCS, R2) or a dedicated endpoint on the application server itself, depending on the team's infrastructure. The main JSON API endpoints (`/recipes`, `/authors`, etc., including `/files` itself) **MUST NOT** accept raw binary or `multipart/form-data` in their body when using this mode.
+
+#### Step 3 — Complete
+
+`POST /files/{id}/complete`
+
+The server **MUST** verify the file's actual existence in the destination storage (not merely trust the client's claim) before changing `status` to `completed`.
+
+Response (`200 OK`):
+
+```json
+{
+  "data": {
+    "id": "9f1c2e3a-1b2c-4d5e-8f9a-0b1c2d3e4f5a",
+    "status": "completed",
+    "filename": "nasi-goreng.jpg",
+    "content_type": "image/jpeg",
+    "category": "image",
+    "size_bytes": 204800,
+    "url": "https://cdn.domain.com/files/9f1c2e3a....jpg",
+    "upload_url": null,
+    "upload_method": null,
+    "expires_at": null,
+    "created_at": "2026-07-10T09:00:00Z"
+  },
+  "error": null,
+  "meta": {
+    "request_id": "c4f2a3b5-6d7e-8f9a-0b1c-2d3e4f5a6b7c",
+    "timestamp": "2026-07-10T09:01:30Z"
+  }
+}
+```
+
+If verification fails (file not found in storage), the server **MUST** return error `file_verification_failed` and `status` remains `pending` or changes to `failed` depending on the team's retry policy.
+
+#### Step 4 — Attach to resource
+
+See [Section 5.5](#55-attaching-files-to-resources).
+
+### 5.4 Direct Upload Model
+
+A single-step flow where the client sends the file directly to `POST /files` using `multipart/form-data`. The server receives, validates, stores, and returns the completed resource in one request.
+
+`POST /files` with `Content-Type: multipart/form-data`
+
+Response (`201 Created`):
+
+```json
+{
+  "data": {
+    "id": "9f1c2e3a-1b2c-4d5e-8f9a-0b1c2d3e4f5a",
+    "status": "completed",
+    "filename": "avatar.png",
+    "content_type": "image/png",
+    "category": "image",
+    "size_bytes": 51200,
+    "url": "https://cdn.domain.com/files/9f1c2e3a....png",
+    "upload_url": null,
+    "upload_method": null,
+    "expires_at": null,
+    "created_at": "2026-07-10T09:00:00Z"
+  },
+  "error": null,
+  "meta": {
+    "request_id": "d5a3b4c6-7e8f-9a0b-1c2d-3e4f5a6b7c8d",
+    "timestamp": "2026-07-10T09:00:00Z"
+  }
+}
+```
+
+`multipart/form-data` is the **only exception** to the "request body must be flat JSON" rule (Section 3), specifically for `POST /files` in Direct Upload mode. The resource skips the `pending` state entirely — `status` is `completed` immediately upon success.
+
+### 5.5 Attaching Files to Resources
+
+Use the existing foreign key pattern — not a new endpoint:
+
+```
+PATCH /recipes/1
+```
+
+```json
+{
+  "photo_id": "9f1c2e3a-1b2c-4d5e-8f9a-0b1c2d3e4f5a"
+}
+```
+
+The server **MUST** reject the attach if the file's `status` is anything other than `completed` (see error `file_not_ready`).
+
+### 5.6 Validation & Policy
+
+Policy **SHOULD** be configured per usage context (not a single global policy), via an optional `purpose` parameter in the upload request:
+
+```json
+{
+  "filename": "avatar.png",
+  "content_type": "image/png",
+  "size_bytes": 51200,
+  "purpose": "author_avatar"
+}
+```
+
+Example policy table (defined by the implementation team, not a rigid part of this spec):
+
+| `purpose`         | Max `size_bytes` | Allowed `content_type`                  |
+| ----------------- | ---------------- | --------------------------------------- |
+| `author_avatar`   | 2 MB             | `image/jpeg`, `image/png`, `image/webp` |
+| `recipe_photo`    | 10 MB            | `image/jpeg`, `image/png`, `image/webp` |
+| `recipe_document` | 25 MB            | `application/pdf`                       |
+
+If `purpose` is not sent, the server **MAY** apply a more permissive default policy, or **MUST** reject with `purpose_required` — this choice is defined by the implementation team.
+
+### 5.7 Routing Rules
+
+- Action endpoints **MUST** be placed after `{id}` (pattern: `/files/{id}/complete`). They **MUST NOT** be placed directly after the collection without `{id}` (pattern: `/files/complete` is forbidden) — this prevents routing ambiguity with `GET/DELETE /files/{id}`.
+- `{id}` **MUST** be a UUID (not a free-form string or simple integer). This makes static segments like `complete` automatically invalid as `{id}` values, eliminating collision risk.
+- These rules apply universally to all action endpoints in ByJSON, not just `/files` (see Section 2.3).
+
+### 5.8 Orphan Cleanup
+
+- Files with `status = pending` that are not completed within `expires_at` **MUST** be treated as expired and may be automatically deleted by a scheduled job.
+- Files with `status = completed` that are never referenced by any resource within a configurable period (e.g., 24–72 hours) **SHOULD** be cleaned up by a separate scheduled job, to prevent storage from filling with orphaned files caused by client crashes between upload completion and resource attachment.
+
+### 5.9 File Representation in Other Resources
+
+When another resource (e.g., `recipe`) has a relation to a file, display it as a summary object — consistent with the relational data pattern in Section 4.2:
+
+```json
+{
+  "id": 1,
+  "title": "Nasi Goreng Spesial",
+  "photo": {
+    "id": "9f1c2e3a-1b2c-4d5e-8f9a-0b1c2d3e4f5a",
+    "url": "https://cdn.domain.com/files/9f1c2e3a....jpg",
+    "content_type": "image/jpeg"
+  }
+}
+```
+
+`photo_id` is used as the request field (write), while `photo` (object) is used as the response field (read) — following the same `author_id` (write) vs `author` (read) pattern already established in the core spec.
+
+## 6. Reference Tables
+
+### 6.1 Error Code Reference
+
+| Error Code                 | HTTP Status | Description                                                      |
+| -------------------------- | ----------- | ---------------------------------------------------------------- |
+| `bad_request`              | 400         | The request body is malformed JSON and cannot be parsed.         |
+| `validation_error`         | 422         | The request data failed validation rules. See `details`.         |
+| `unauthorized`             | 401         | Authentication is required or the token has expired.             |
+| `forbidden`                | 403         | The authenticated user does not have permission.                 |
+| `not_found`                | 404         | The requested resource does not exist.                           |
+| `method_not_allowed`       | 405         | The HTTP method is not supported for this endpoint.              |
+| `conflict`                 | 409         | The request conflicts with the current state of the resource.    |
+| `file_not_ready`           | 409         | File cannot be attached because its `status` is not `completed`. |
+| `upload_url_expired`       | 410         | The `upload_url` has passed its `expires_at` timestamp.          |
+| `file_too_large`           | 422         | `size_bytes` exceeds the limit for the given `purpose`.          |
+| `unsupported_file_type`    | 422         | `content_type` is not allowed for the given `purpose`.           |
+| `purpose_required`         | 422         | `purpose` is required but was not provided.                      |
+| `file_verification_failed` | 422         | Server could not find the file in storage during completion.     |
+| `too_many_requests`        | 429         | The client has exceeded the rate limit.                          |
+| `internal_error`           | 500         | An unexpected server error occurred.                             |
+| `service_unavailable`      | 503         | The server is temporarily unavailable.                           |
+
+### 6.2 Filter Operator Reference
 
 These operators are used inside LHS Brackets for advanced filtering (e.g., `field[operator]=value`).
 
@@ -644,7 +906,7 @@ These operators are used inside LHS Brackets for advanced filtering (e.g., `fiel
 
 _Note: For simple equality checks, you may omit the bracket notation entirely and use the field name directly (e.g., `difficulty=EASY` is equivalent to `difficulty[eq]=EASY`). By default, any field without an operator bracket uses `eq`._
 
-### 5.3 Meta Object Specification
+### 6.3 Meta Object Specification
 
 The `meta` object is present in every response.
 
