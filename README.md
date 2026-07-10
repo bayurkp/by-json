@@ -49,13 +49,15 @@ ByJSON sits in the middle: **structured enough to be predictable, simple enough 
 
 ---
 
+The key words "**MUST**", "**MUST NOT**", "**REQUIRED**", "**SHALL**", "**SHALL NOT**", "**SHOULD**", "**SHOULD NOT**", "**RECOMMENDED**", "**MAY**", and "**OPTIONAL**" in this document are to be interpreted as described in [RFC 2119](https://datatracker.ietf.org/doc/html/rfc2119).
+
 ## 1. Principles
 
-| Principle                 | Description                                                                                  |
-| ------------------------- | -------------------------------------------------------------------------------------------- |
-| **Predictable Structure** | Every response has the same three root keys: `data`, `error`, and `meta`. No guessing.       |
-| **Simplicity**            | Relational data is nested directly inside the parent object — no separate `included` block.  |
-| **Clarity**               | Success and error payloads are mutually exclusive. If one is populated, the other is `null`. |
+| Principle                 | Description                                                                                           |
+| ------------------------- | ----------------------------------------------------------------------------------------------------- |
+| **Predictable Structure** | Every response **MUST** have the same three root keys: `data`, `error`, and `meta`. No guessing.      |
+| **Simplicity**            | Relational data is nested directly inside the parent object — no separate `included` block.           |
+| **Clarity**               | Success and error payloads are mutually exclusive. If one is populated, the other **MUST** be `null`. |
 
 ## 2. Naming Conventions
 
@@ -72,7 +74,7 @@ _Note: `snake_case` is chosen for maximum consistency with backend database colu
 
 ### 2.2 Error Codes
 
-Error codes must also use `snake_case` (e.g. `validation_error`) for maximum consistency.
+Error codes **MUST** also use `snake_case` (e.g. `validation_error`) for maximum consistency.
 
 ```
 ✅  validation_error, not_found, bad_request
@@ -81,7 +83,7 @@ Error codes must also use `snake_case` (e.g. `validation_error`) for maximum con
 
 ### 2.3 Resource URLs
 
-_Note: URL versioning (e.g., `/v1/`) is highly recommended but falls outside the scope of this JSON specification._
+_Note: URL versioning (e.g., `/v1/`) is **RECOMMENDED** but falls outside the scope of this JSON specification._
 
 | Rule                                        | Example                                 |
 | ------------------------------------------- | --------------------------------------- |
@@ -89,6 +91,8 @@ _Note: URL versioning (e.g., `/v1/`) is highly recommended but falls outside the
 | Use **kebab-case** for multi-word resources | `/cooking-steps` (not `/cooking_steps`) |
 | Use **nesting** only for strict ownership   | `/authors/1/recipes`                    |
 | Use **action URLs** for specific operations | `/recipes/1/bookmark`                   |
+
+Resource URLs **MUST** use plural nouns and **MUST** use kebab-case for multi-word segments.
 
 ### 2.4 Endpoint Reference
 
@@ -107,7 +111,7 @@ The examples throughout this spec use the following `Recipe` and `Author` resour
 
 ## 3. Requests
 
-When sending data to the server (`POST`, `PUT`, `PATCH`), the request body must be a flat JSON object. Relationships are referenced by their foreign key (e.g., `author_id`) rather than nested objects.
+When sending data to the server (`POST`, `PUT`, `PATCH`), the request body **MUST** be a flat JSON object. Relationships **MUST** be referenced by their foreign key (e.g., `author_id`) rather than nested objects.
 
 ### 3.1 Create
 
@@ -131,7 +135,7 @@ When sending data to the server (`POST`, `PUT`, `PATCH`), the request body must 
 
 `PUT /recipes/1`
 
-A full update replaces the entire resource. All writable fields must be provided.
+A full update replaces the entire resource. All writable fields **MUST** be provided.
 
 ```json
 {
@@ -183,7 +187,7 @@ Both **offset-based** and **cursor-based** pagination are supported. **The serve
 - **Use cursor-based** when the client uses infinite scroll / "load more", or for massive/fast-changing datasets where query performance is prioritized over absolute navigation.
 
 **Constraint:**
-Cursor pagination **MUST** be used alongside a deterministic sort order that has a unique tiebreaker (usually `id`). Sorting solely by non-unique fields (e.g., `created_at`) will cause items to be skipped or duplicated between pages. Cursors should also be opaque (e.g., base64 encoded strings) to prevent clients from depending on internal data structures.
+Cursor pagination **MUST** be used alongside a deterministic sort order that has a unique tiebreaker (usually `id`). Sorting solely by non-unique fields (e.g., `created_at`) will cause items to be skipped or duplicated between pages. Cursors **SHOULD** also be opaque (e.g., base64 encoded strings) to prevent clients from depending on internal data structures.
 
 **Offset-based Parameters:**
 
@@ -243,7 +247,7 @@ A client may request that only specific fields be returned in the response by us
 GET /recipes?fields=id,title,difficulty,author.name
 ```
 
-If `fields` is specified, the server **MUST NOT** include additional fields beyond those requested. If `fields` is omitted, the server may return all fields.
+If `fields` is specified, the server **MUST NOT** include additional fields beyond those requested. If `fields` is omitted, the server **MAY** return all fields.
 
 #### Full Example
 
@@ -276,7 +280,7 @@ The `meta` object is **always present** in both success and error responses. It 
 
 ### 4.2 Success Responses
 
-For successful operations (HTTP `2xx`), `error` must be `null`.
+For successful operations (HTTP `2xx`), `error` **MUST** be `null`.
 
 Relational data (like `author`) is always embedded as a **summary object** directly inside the parent entity. This avoids the need for a separate `included` block while keeping the payload concise.
 
@@ -519,9 +523,9 @@ Action endpoints that do not correspond to a single resource's state (e.g., `POS
 
 #### H. Bulk Operations (HTTP 207)
 
-Bulk operations (Bulk Create, Update, or Delete) can result in partial failures. The request itself is successful, but individual items may fail. To represent this while maintaining the mutual exclusivity of `data` and `error`, bulk endpoints should use the HTTP `207 Multi-Status` code and return `succeeded` and `failed` arrays inside the `data` object.
+Bulk operations (Bulk Create, Update, or Delete) can result in partial failures. The request itself is successful, but individual items may fail. To represent this while maintaining the mutual exclusivity of `data` and `error`, bulk endpoints **SHOULD** use the HTTP `207 Multi-Status` code and return `succeeded` and `failed` arrays inside the `data` object.
 
-The `error` object remains `null` because there was no request-level failure (e.g., malformed JSON or unauthorized access).
+The `error` object **MUST** remain `null` because there was no request-level failure (e.g., malformed JSON or unauthorized access).
 
 `POST /recipes/bulk-delete` (or `DELETE /recipes?ids=1,2,3`)
 
@@ -550,13 +554,13 @@ The `error` object remains `null` because there was no request-level failure (e.
 
 ### 4.3 Error Responses
 
-For failed operations (HTTP `4xx` / `5xx`), `data` must be `null`.
+For failed operations (HTTP `4xx` / `5xx`), `data` **MUST** be `null`.
 
 #### A. Validation Errors (HTTP 422)
 
 Used when the request body fails validation rules. The `details` array points to the exact location of each error using the `field` key.
 
-**Field Path Notation:** Use dot notation for nested objects (e.g., `shipping_address.city_name`) and array index notation for array items (e.g., `ingredients[0].name`).
+**Field Path Notation:** Validation errors **MUST** use dot notation for nested objects (e.g., `shipping_address.city_name`) and array index notation for array items (e.g., `ingredients[0].name`).
 
 ```json
 {
