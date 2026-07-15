@@ -171,6 +171,8 @@ A partial update modifies only the fields provided.
 - **Omitted fields** remain unchanged.
 - **`null` values** explicitly unset or remove the field/relationship (if the field is nullable).
 
+_Note for implementers:_ Distinguishing between an omitted field and an explicit `null` value can be challenging in strongly-typed languages (like Go or Java). It typically requires pointer types (e.g., `*string`) or field presence wrappers.
+
 ```json
 {
   "title": "Nasi Goreng Spesial (Extra Pedas)"
@@ -247,7 +249,7 @@ For advanced filtering (range, comparison), use LHS Brackets. The operator is pl
 GET /recipes?duration_minutes[gte]=15&duration_minutes[lte]=60
 ```
 
-See [Section 5.2](#52-filter-operator-reference) for the full list of supported operators.
+See [Section 6.2](#62-filter-operator-reference) for the full list of supported operators.
 
 #### Field Selection
 
@@ -292,7 +294,7 @@ The `meta` object is **always present** in both success and error responses. It 
 
 For successful operations (HTTP `2xx`), `error` **MUST** be `null`.
 
-Relational data (like `author`) is always embedded as a **summary object** directly inside the parent entity. This avoids the need for a separate `included` block while keeping the payload concise.
+Relational data (like `author`) is always embedded as a **summary object** directly inside the parent entity. This avoids the need for a separate `included` block while keeping the payload concise. A summary object **MUST** always contain the resource's `id` field, and **MAY** contain other identifying fields (like `name` or `title`).
 
 #### A. Single Object
 
@@ -427,7 +429,7 @@ Relational data (like `author`) is always embedded as a **summary object** direc
       "has_more": true,
       "cursors": {
         "next": "eyJpZCI6MTB9",
-        "prev": "eyJpZCI6MX0="
+        "prev": null
       },
       "links": {
         "self": "https://api.domain.com/recipes?per_page=10",
@@ -511,7 +513,7 @@ Relational data (like `author`) is always embedded as a **summary object** direc
 
 Action endpoints that modify the state of a single resource (e.g., `POST /recipes/1/bookmark`) **MUST** return the updated representation of that resource in `data`, identical to a `PATCH` response.
 
-Action endpoints that do not correspond to a single resource's state (e.g., `POST /recipes/1/send-to-email` or `/auth/logout`) may return a minimal payload (like `{"success": true}`) or `null` in the `data` field, relying purely on the HTTP status code to convey success.
+Action endpoints that do not correspond to a single resource's state (e.g., `POST /recipes/1/send-to-email` or `/auth/logout`) **MUST** return `null` in the `data` field, relying purely on the HTTP status code to convey success.
 
 `POST /recipes/1/bookmark`
 
@@ -537,7 +539,7 @@ Bulk operations (Bulk Create, Update, or Delete) can result in partial failures.
 
 The `error` object **MUST** remain `null` because there was no request-level failure (e.g., malformed JSON or unauthorized access).
 
-`POST /recipes/bulk-delete` (or `DELETE /recipes?ids=1,2,3`)
+`POST /recipes/bulk-delete`
 
 ```json
 {
@@ -570,7 +572,7 @@ For failed operations (HTTP `4xx` / `5xx`), `data` **MUST** be `null`.
 
 Used when the request body fails validation rules. The `details` array points to the exact location of each error using the `field` key.
 
-**Field Path Notation:** Validation errors **MUST** use dot notation for nested objects (e.g., `shipping_address.city_name`) and array index notation for array items (e.g., `ingredients[0].name`).
+**Field Path Notation:** Validation errors **MUST** use JSON Pointer (RFC 6901) notation for nested objects and array items (e.g., `/shipping_address/city_name`, `/ingredients/0/name`).
 
 ```json
 {
@@ -590,7 +592,7 @@ Used when the request body fails validation rules. The `details` array points to
         "message": "The duration must be at least 1 minute."
       },
       {
-        "field": "ingredients[0].name",
+        "field": "/ingredients/0/name",
         "code": "invalid_format",
         "message": "Ingredient name must not contain special characters."
       }
@@ -885,7 +887,7 @@ When another resource (e.g., `recipe`) has a relation to a file, display it as a
 | `file_too_large`           | 422         | `size_bytes` exceeds the limit for the given `purpose`.          |
 | `unsupported_file_type`    | 422         | `content_type` is not allowed for the given `purpose`.           |
 | `purpose_required`         | 422         | `purpose` is required but was not provided.                      |
-| `file_verification_failed` | 422         | Server could not find the file in storage during completion.     |
+| `file_verification_failed` | 409         | Server could not find the file in storage during completion.     |
 | `too_many_requests`        | 429         | The client has exceeded the rate limit.                          |
 | `internal_error`           | 500         | An unexpected server error occurred.                             |
 | `service_unavailable`      | 503         | The server is temporarily unavailable.                           |
@@ -903,8 +905,11 @@ These operators are used inside LHS Brackets for advanced filtering (e.g., `fiel
 | `lt`     | Less than             | `duration_minutes[lt]=60`    |
 | `lte`    | Less than or equal    | `duration_minutes[lte]=60`   |
 | `in`     | In array of values    | `difficulty[in]=EASY,MEDIUM` |
+| `like`   | Pattern match         | `title[like]=%goreng%`       |
 
-_Note: For simple equality checks, you may omit the bracket notation entirely and use the field name directly (e.g., `difficulty=EASY` is equivalent to `difficulty[eq]=EASY`). By default, any field without an operator bracket uses `eq`._
+_Note 1:_ For simple equality checks, you may omit the bracket notation entirely and use the field name directly (e.g., `difficulty=EASY` is equivalent to `difficulty[eq]=EASY`). By default, any field without an operator bracket uses `eq`.
+
+_Note 2:_ For the `in` operator, if a value itself contains a comma, it **MUST** be URL-encoded (e.g., `Washington%2CD.C.`). Alternatively, the server **MAY** support repeated keys (e.g., `city[in]=Washington, D.C.&city[in]=New York`).
 
 ### 6.3 Meta Object Specification
 
