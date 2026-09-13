@@ -29,32 +29,30 @@ ByJSON sits in the middle: **structured enough to be predictable, simple enough 
 - [2. Naming Conventions](#2-naming-conventions)
   - [2.1 JSON Keys](#21-json-keys)
   - [2.2 Error Codes](#22-error-codes)
-  - [2.3 Resource URLs](#23-resource-urls)
-  - [2.4 Endpoint Reference](#24-endpoint-reference)
-- [3. Requests](#3-requests)
-  - [3.1 Create](#31-create)
-  - [3.2 Update (Full)](#32-update-full)
-  - [3.3 Update (Partial)](#33-update-partial)
-  - [3.4 Delete](#34-delete)
-  - [3.5 Query Parameters](#35-query-parameters)
-- [4. Responses](#4-responses)
-  - [4.1 General Payload Structure](#41-general-payload-structure)
-  - [4.2 Success Responses](#42-success-responses)
-  - [4.3 Error Responses](#43-error-responses)
-- [5. File Resources](#5-file-resources)
-  - [5.1 Resource Structure](#51-resource-structure)
-  - [5.2 Endpoints](#52-endpoints)
-  - [5.3 Presigned URL Model](#53-presigned-url-model)
-  - [5.4 Direct Upload Model](#54-direct-upload-model)
-  - [5.5 Attaching Files to Resources](#55-attaching-files-to-resources)
-  - [5.6 Validation & Policy](#56-validation--policy)
-  - [5.7 Routing Rules](#57-routing-rules)
-  - [5.8 Orphan Cleanup](#58-orphan-cleanup)
-  - [5.9 File Representation in Other Resources](#59-file-representation-in-other-resources)
-- [6. Reference Tables](#6-reference-tables)
-  - [6.1 Error Code Reference](#61-error-code-reference)
-  - [6.2 Filter Operator Reference](#62-filter-operator-reference)
-  - [6.3 Meta Object Specification](#63-meta-object-specification)
+- [3. URL & Endpoint Design](#3-url--endpoint-design)
+  - [3.1 Resource URLs](#31-resource-urls)
+  - [3.2 Process Endpoints](#32-process-endpoints)
+  - [3.3 Endpoint Reference](#33-endpoint-reference)
+- [4. Requests](#4-requests)
+  - [4.1 Create](#41-create)
+  - [4.2 Update (Full)](#42-update-full)
+  - [4.3 Update (Partial)](#43-update-partial)
+  - [4.4 Delete](#44-delete)
+  - [4.5 Query Parameters](#45-query-parameters)
+- [5. Responses](#5-responses)
+  - [5.1 General Payload Structure](#51-general-payload-structure)
+  - [5.2 Success Responses](#52-success-responses)
+  - [5.3 Error Responses](#53-error-responses)
+- [6. Advanced Patterns](#6-advanced-patterns)
+  - [6.1 File Resources](#61-file-resources)
+  - [6.2 Aggregate & Metric Sub-Resources](#62-aggregate--metric-sub-resources)
+  - [6.3 Offline-First Sync](#63-offline-first-sync)
+  - [6.4 Multi-Audience API (Namespace Separation)](#64-multi-audience-api-namespace-separation)
+  - [6.5 Idempotency Keys](#65-idempotency-keys)
+- [7. Reference Tables](#7-reference-tables)
+  - [7.1 Error Code Reference](#71-error-code-reference)
+  - [7.2 Filter Operator Reference](#72-filter-operator-reference)
+  - [7.3 Meta Object Specification](#73-meta-object-specification)
 - [License](#license)
 
 ---
@@ -68,6 +66,7 @@ The key words "**MUST**", "**MUST NOT**", "**REQUIRED**", "**SHALL**", "**SHALL 
 | **Predictable Structure** | Every response **MUST** have the same three root keys: `data`, `error`, and `meta`. No guessing.      |
 | **Simplicity**            | Relational data is nested directly inside the parent object — no separate `included` block.           |
 | **Clarity**               | Success and error payloads are mutually exclusive. If one is populated, the other **MUST** be `null`. |
+| **Agnosticism**           | The spec is agnostic to audience (end-user, admin, B2B, B2C, C2C). URIs identify data entities, not the perspective of the caller. Authorization policy — not the URL — determines what data is visible to whom. |
 
 ## 2. Naming Conventions
 
@@ -91,7 +90,9 @@ Error codes **MUST** also use `snake_case` (e.g. `validation_error`) for maximum
 ❌  VALIDATION_ERROR, NotFound, BadRequest
 ```
 
-### 2.3 Resource URLs
+## 3. URL & Endpoint Design
+
+### 3.1 Resource URLs
 
 _Note: URL versioning (e.g., `/v1/`) is **RECOMMENDED** but falls outside the scope of this JSON specification._
 
@@ -104,26 +105,122 @@ _Note: URL versioning (e.g., `/v1/`) is **RECOMMENDED** but falls outside the sc
 
 Resource URLs **MUST** use plural nouns and **MUST** use kebab-case for multi-word segments.
 
-### 2.4 Endpoint Reference
+#### Ownership & Hierarchy
+
+If a resource belongs to a parent entity, its URI **SHOULD** reflect that ownership through nesting:
+
+```
+GET /users/{user_id}/recipes     — recipes belonging to a specific user
+GET /authors/{author_id}/recipes — recipes belonging to a specific author
+```
+
+Server **MAY** support the alias `me` as a contextual substitute for `{user_id}` when the caller is an authenticated user accessing their own data:
+
+```
+GET /users/me/recipes     — equivalent to /users/{caller_user_id}/recipes
+```
+
+If `me` is supported, it **MUST** be applied consistently across all resources in the same namespace — not selectively on some endpoints and not others.
+
+Alternatively, when an API exclusively serves a single authenticated owner (i.e., a client can only ever access their own data), implicit scoping via the auth token is valid — provided no admin or cross-user variant of the same endpoint exists in the same namespace:
+
+```
+✅ GET /recipes          (scoped implicitly to the calling user via JWT — valid if no admin /recipes exists)
+✅ GET /users/{id}/recipes  (explicit hierarchy — always valid regardless of audience)
+❌ GET /recipes          (implicit user scope) + GET /recipes (admin all-user scope) — ambiguous, MUST NOT exist in the same namespace
+```
+
+See [Section 6.4](#64-multi-audience-api-namespace-separation) for handling APIs that serve multiple audiences.
+
+#### Anti-Collision Rule for Action Endpoints
+
+Action endpoints **MUST** be placed after `{id}`, never directly after the collection name. This prevents routing ambiguity with `GET /{resource}/{id}`.
+
+```
+✅ POST /recipes/{id}/bookmark    — action after {id}
+❌ POST /recipes/bookmark         — ambiguous: is "bookmark" an {id} or an action?
+```
+
+This rule does **NOT** apply to read-only sub-resources (aggregates and metrics). Static path segments that return computed data via `GET` and do not mutate state are not considered "actions" under this rule:
+
+```
+✅ GET /reviews/pending-count      — read-only aggregate, not a state-mutating action
+✅ GET /recipes/summary            — read-only metric
+✅ GET /cooking-sessions/sync      — read-only delta sync feed
+```
+
+_Note: `{id}` **SHOULD** be a UUID. Using UUIDs as identifiers eliminates routing collision risk entirely — a static segment like `summary` can never be confused for a valid UUID._
+
+### 3.2 Process Endpoints
+
+Not all API functionality can be modelled as CRUD operations on data entities. **Process Endpoints** represent protocols, system operations, or subsystems that do not have a data resource as their primary subject.
+
+#### Resource Endpoints vs Process Endpoints
+
+| | Resource Endpoint | Process Endpoint |
+| --- | --- | --- |
+| **Subject** | A data entity with a lifecycle (create, read, update, delete) | A protocol, operation, or system interaction |
+| **Verb in URL** | ❌ MUST NOT use verb — HTTP method carries the verb | ✅ MAY use verb/event name as the action segment |
+| **Example** | `POST /cooking-sessions` (not `/cooking-sessions/start`) | `POST /auth/signin` |
+
+**Rule:** If a `POST` operation creates a new data record that can later be retrieved by `GET /{resource}/{id}` or deleted by `DELETE /{resource}/{id}`, it is a **Resource Endpoint** and MUST follow standard CRUD conventions — the verb belongs in the HTTP Method, not the URL.
+
+```
+✅  POST /cooking-sessions      — creates a session record; retrievable later
+❌  POST /cooking-sessions/start — verb in URL; violates Resource Endpoint rules
+
+✅  POST /auth/signin         — no persistent resource created; auth protocol
+✅  POST /auth/logout         — triggers token revocation; no resource entity
+✅  POST /webhooks/stripe     — receives external event; not a user-created resource
+```
+
+#### Process Endpoint URI Format
+
+Process Endpoints **MUST** be grouped under a subsystem prefix and **MUST** use a verb or event name as the action segment:
+
+```
+POST /{subsystem}/{verb-or-event}
+```
+
+Examples:
+
+| Endpoint | Subsystem | Classification |
+| --- | --- | --- |
+| `POST /auth/signin` | Authentication protocol | Process |
+| `POST /auth/signup` | Authentication protocol | Process |
+| `POST /auth/refresh` | Token refresh protocol | Process |
+| `POST /auth/logout` | Token revocation | Process |
+| `POST /webhooks/{provider}` | External event receiver | Process |
+
+#### Response Contract for Process Endpoints
+
+Process Endpoints **MUST** still return the standard ByJSON envelope (`data`, `error`, `meta`). For operations that do not return a meaningful resource object (e.g., logout), `data` **MUST** be `null`.
+
+### 3.3 Endpoint Reference
 
 The examples throughout this spec use the following `Recipe` and `Author` resources:
 
-| Method   | Endpoint              | Description                       |
-| -------- | --------------------- | --------------------------------- |
-| `GET`    | `/recipes`            | List all recipes                  |
-| `GET`    | `/recipes/1`          | Get a single recipe               |
-| `POST`   | `/recipes`            | Create a new recipe               |
-| `PUT`    | `/recipes/1`          | Full update a recipe              |
-| `PATCH`  | `/recipes/1`          | Partial update a recipe           |
-| `DELETE` | `/recipes/1`          | Delete a recipe                   |
-| `GET`    | `/authors/1/recipes`  | List recipes by a specific author |
-| `POST`   | `/recipes/1/bookmark` | Bookmark a specific recipe        |
+| Method   | Endpoint                        | Description                          |
+| -------- | ------------------------------- | ------------------------------------ |
+| `GET`    | `/recipes`                      | List all recipes                     |
+| `GET`    | `/recipes/{id}`                 | Get a single recipe                  |
+| `POST`   | `/recipes`                      | Create a new recipe                  |
+| `PUT`    | `/recipes/{id}`                 | Full update a recipe                 |
+| `PATCH`  | `/recipes/{id}`                 | Partial update a recipe              |
+| `DELETE` | `/recipes/{id}`                 | Delete a recipe                      |
+| `GET`    | `/authors/{id}/recipes`         | List recipes by a specific author    |
+| `POST`   | `/recipes/{id}/bookmark`        | Bookmark a specific recipe (action)  |
+| `GET`    | `/recipes/summary`              | Aggregate metrics across recipes     |
+| `GET`    | `/recipes/sync`                 | Delta sync feed for offline clients  |
+| `POST`   | `/recipes/bulk-delete`          | Bulk delete by ID list               |
+| `POST`   | `/recipes/archive-all`          | Collection-wide state transition     |
+| `POST`   | `/auth/signin`                  | Authenticate user (process endpoint) |
 
-## 3. Requests
+## 4. Requests
 
 When sending data to the server (`POST`, `PUT`, `PATCH`), the request body **MUST** be a flat JSON object. Relationships **MUST** be referenced by their foreign key (e.g., `author_id`) rather than nested objects.
 
-### 3.1 Create
+### 4.1 Create
 
 `POST /recipes`
 
@@ -141,7 +238,7 @@ When sending data to the server (`POST`, `PUT`, `PATCH`), the request body **MUS
 }
 ```
 
-### 3.2 Update (Full)
+### 4.2 Update (Full)
 
 `PUT /recipes/1`
 
@@ -162,7 +259,7 @@ A full update replaces the entire resource. All writable fields **MUST** be prov
 }
 ```
 
-### 3.3 Update (Partial)
+### 4.3 Update (Partial)
 
 `PATCH /recipes/1`
 
@@ -179,13 +276,13 @@ _Note for implementers:_ Distinguishing between an omitted field and an explicit
 }
 ```
 
-### 3.4 Delete
+### 4.4 Delete
 
 `DELETE /recipes/1`
 
 Delete operations do not require a JSON request body.
 
-### 3.5 Query Parameters
+### 4.5 Query Parameters
 
 When retrieving collections, use query parameters for pagination, sorting, filtering, and field selection.
 
@@ -249,7 +346,7 @@ For advanced filtering (range, comparison), use LHS Brackets. The operator is pl
 GET /recipes?duration_minutes[gte]=15&duration_minutes[lte]=60
 ```
 
-See [Section 6.2](#62-filter-operator-reference) for the full list of supported operators.
+See [Section 7.2](#72-filter-operator-reference) for the full list of supported operators.
 
 #### Field Selection
 
@@ -267,9 +364,9 @@ If `fields` is specified, the server **MUST NOT** include additional fields beyo
 GET /recipes?page=1&per_page=10&sort=-duration_minutes&difficulty=EASY&duration_minutes[gte]=15&fields=id,title,duration_minutes,author.name
 ```
 
-## 4. Responses
+## 5. Responses
 
-### 4.1 General Payload Structure
+### 5.1 General Payload Structure
 
 Every response — whether success or failure — **MUST** contain exactly three root-level keys:
 
@@ -290,7 +387,7 @@ Every response — whether success or failure — **MUST** contain exactly three
 
 The `meta` object is **always present** in both success and error responses. It provides debugging context (`request_id`, `timestamp`) that is useful regardless of the outcome.
 
-### 4.2 Success Responses
+### 5.2 Success Responses
 
 For successful operations (HTTP `2xx`), `error` **MUST** be `null`.
 
@@ -564,7 +661,49 @@ The `error` object **MUST** remain `null` because there was no request-level fai
 }
 ```
 
-### 4.3 Error Responses
+#### I. Collection-Wide State Transitions (HTTP 200)
+
+Some operations change the state of an entire collection (or a filtered subset) without requiring individual IDs — for example, marking all pending reviews as approved, or archiving all completed recipes.
+
+These are distinct from Bulk Operations (Section H) because the client does not enumerate individual items. They are also distinct from Resource Endpoint actions (Section G) because there is no single `{id}` being acted upon.
+
+Collection-Wide State Transitions **MUST** use `POST` (not `PATCH`), because the client is issuing a command — not sending a delta payload of field changes.
+
+Format: `POST /{resource}/{collection-action}`
+
+The response **MUST** include `affected_count` in `data` so the client can update its local state without a separate refetch.
+
+`POST /reviews/approve-all`
+
+Request body (optional filter scope):
+```json
+{
+  "before_date": "2026-09-01T00:00:00Z"
+}
+```
+
+Response:
+```json
+{
+  "data": {
+    "affected_count": 12
+  },
+  "error": null,
+  "meta": {
+    "request_id": "7c3e1a2b-4d5f-6a7b-8c9d-0e1f2a3b4c5d",
+    "timestamp": "2026-09-12T08:00:00Z"
+  }
+}
+```
+
+| Pattern | Example | Classification |
+| --- | --- | --- |
+| Mark all as approved | `POST /reviews/approve-all` | Collection-Wide Transition |
+| Archive all completed | `POST /recipes/archive-completed` | Collection-Wide Transition |
+| Bulk delete by IDs | `POST /recipes/bulk-delete` + body with ID list | Bulk Operation (Section H) |
+| Update one item | `PATCH /reviews/{id}` + delta body | Standard Partial Update |
+
+### 5.3 Error Responses
 
 For failed operations (HTTP `4xx` / `5xx`), `data` **MUST** be `null`.
 
@@ -623,7 +762,9 @@ Used for malformed requests, authentication, authorization, not found, or server
 }
 ```
 
-## 5. File Resources
+## 6. Advanced Patterns
+
+### 6.1 File Resources
 
 Files — images, videos, documents, archives, or any binary type — are **first-class resources** represented under a single `/files` endpoint. They are differentiated by the `category` field (derived from `content_type`), not by separate endpoints.
 
@@ -636,10 +777,10 @@ Files — images, videos, documents, archives, or any binary type — are **firs
 
 | Condition                                                                | Recommended Mode            |
 | ------------------------------------------------------------------------ | --------------------------- |
-| Large files, high volume, no need for synchronous server-side processing | Presigned URL (Section 5.3) |
-| Small files, need immediate validation/processing, simple monolith setup | Direct Upload (Section 5.4) |
+| Large files, high volume, no need for synchronous server-side processing | Presigned URL Model (see below) |
+| Small files, need immediate validation/processing, simple monolith setup | Direct Upload Model (see below) |
 
-### 5.1 Resource Structure
+#### Resource Structure
 
 #### Fields
 
@@ -671,7 +812,7 @@ The server **MUST** determine `category` from `content_type`. The client must no
 | `application/zip`, `application/x-rar-compressed`, `application/x-tar`                     | `archive`  |
 | anything else                                                                              | `other`    |
 
-### 5.2 Endpoints
+#### Endpoints
 
 | Method   | Endpoint               | Description                                                                                                               |
 | -------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------- |
@@ -680,11 +821,18 @@ The server **MUST** determine `category` from `content_type`. The client must no
 | `GET`    | `/files/{id}`          | Retrieve metadata of a file                                                                                               |
 | `DELETE` | `/files/{id}`          | Delete a file (soft delete recommended)                                                                                   |
 
-All action endpoints (`/complete`) appear **after** `{id}`, never directly after the collection — this avoids routing ambiguity with `GET/DELETE /files/{id}` (see Section 5.7).
+All action endpoints (`/complete`) appear **after** `{id}`, never directly after the collection — this avoids routing ambiguity with `GET/DELETE /files/{id}` (see [Routing Rules](#routing-rules) below).
 
-### 5.3 Presigned URL Model
+#### Presigned URL Model
 
 A four-step flow where binary transfer is offloaded to a separate URL (object storage or a dedicated upload endpoint on the server itself).
+
+**Guidance:**
+
+| Condition                                                                | Recommended Mode      |
+| ------------------------------------------------------------------------ | --------------------- |
+| Large files, high volume, no need for synchronous server-side processing | Presigned URL Model   |
+| Small files, need immediate validation/processing, simple monolith setup | Direct Upload Model   |
 
 #### Step 1 — Register upload intent
 
@@ -768,7 +916,7 @@ If verification fails (file not found in storage), the server **MUST** return er
 
 See [Section 5.5](#55-attaching-files-to-resources).
 
-### 5.4 Direct Upload Model
+#### Direct Upload Model
 
 A single-step flow where the client sends the file directly to `POST /files` using `multipart/form-data`. The server receives, validates, stores, and returns the completed resource in one request.
 
@@ -799,9 +947,9 @@ Response (`201 Created`):
 }
 ```
 
-`multipart/form-data` is the **only exception** to the "request body must be flat JSON" rule (Section 3), specifically for `POST /files` in Direct Upload mode. The resource skips the `pending` state entirely — `status` is `completed` immediately upon success.
+`multipart/form-data` is the **only exception** to the "request body must be flat JSON" rule (Section 4), specifically for `POST /files` in Direct Upload mode. The resource skips the `pending` state entirely — `status` is `completed` immediately upon success.
 
-### 5.5 Attaching Files to Resources
+#### Attaching Files to Resources
 
 Use the existing foreign key pattern — not a new endpoint:
 
@@ -817,7 +965,7 @@ PATCH /recipes/1
 
 The server **MUST** reject the attach if the file's `status` is anything other than `completed` (see error `file_not_ready`).
 
-### 5.6 Validation & Policy
+#### Validation & Policy
 
 Policy **SHOULD** be configured per usage context (not a single global policy), via an optional `purpose` parameter in the upload request:
 
@@ -840,20 +988,20 @@ Example policy table (defined by the implementation team, not a rigid part of th
 
 If `purpose` is not sent, the server **MAY** apply a more permissive default policy, or **MUST** reject with `purpose_required` — this choice is defined by the implementation team.
 
-### 5.7 Routing Rules
+#### Routing Rules
 
 - Action endpoints **MUST** be placed after `{id}` (pattern: `/files/{id}/complete`). They **MUST NOT** be placed directly after the collection without `{id}` (pattern: `/files/complete` is forbidden) — this prevents routing ambiguity with `GET/DELETE /files/{id}`.
 - `{id}` **MUST** be a UUID (not a free-form string or simple integer). This makes static segments like `complete` automatically invalid as `{id}` values, eliminating collision risk.
-- These rules apply universally to all action endpoints in ByJSON, not just `/files` (see Section 2.3).
+- These rules apply universally to all action endpoints in ByJSON, not just `/files` (see [Section 3.1](#31-resource-urls)).
 
-### 5.8 Orphan Cleanup
+#### Orphan Cleanup
 
 - Files with `status = pending` that are not completed within `expires_at` **MUST** be treated as expired and may be automatically deleted by a scheduled job.
 - Files with `status = completed` that are never referenced by any resource within a configurable period (e.g., 24–72 hours) **SHOULD** be cleaned up by a separate scheduled job, to prevent storage from filling with orphaned files caused by client crashes between upload completion and resource attachment.
 
-### 5.9 File Representation in Other Resources
+#### File Representation in Other Resources
 
-When another resource (e.g., `recipe`) has a relation to a file, display it as a summary object — consistent with the relational data pattern in Section 4.2:
+When another resource (e.g., `recipe`) has a relation to a file, display it as a summary object — consistent with the relational data pattern in Section 5.2:
 
 ```json
 {
@@ -869,30 +1017,346 @@ When another resource (e.g., `recipe`) has a relation to a file, display it as a
 
 `photo_id` is used as the request field (write), while `photo` (object) is used as the response field (read) — following the same `author_id` (write) vs `author` (read) pattern already established in the core spec.
 
-## 6. Reference Tables
+### 6.2 Aggregate & Metric Sub-Resources
 
-### 6.1 Error Code Reference
+**Aggregate Sub-Resources** are URI endpoints that return computed data (counts, sums, averages, summaries) derived from a collection, rather than the collection's items themselves.
 
-| Error Code                 | HTTP Status | Description                                                      |
-| -------------------------- | ----------- | ---------------------------------------------------------------- |
-| `bad_request`              | 400         | The request body is malformed JSON and cannot be parsed.         |
-| `validation_error`         | 422         | The request data failed validation rules. See `details`.         |
-| `unauthorized`             | 401         | Authentication is required or the token has expired.             |
-| `forbidden`                | 403         | The authenticated user does not have permission.                 |
-| `not_found`                | 404         | The requested resource does not exist.                           |
-| `method_not_allowed`       | 405         | The HTTP method is not supported for this endpoint.              |
-| `conflict`                 | 409         | The request conflicts with the current state of the resource.    |
-| `file_not_ready`           | 409         | File cannot be attached because its `status` is not `completed`. |
-| `upload_url_expired`       | 410         | The `upload_url` has passed its `expires_at` timestamp.          |
-| `file_too_large`           | 422         | `size_bytes` exceeds the limit for the given `purpose`.          |
-| `unsupported_file_type`    | 422         | `content_type` is not allowed for the given `purpose`.           |
-| `purpose_required`         | 422         | `purpose` is required but was not provided.                      |
-| `file_verification_failed` | 409         | Server could not find the file in storage during completion.     |
-| `too_many_requests`        | 429         | The client has exceeded the rate limit.                          |
-| `internal_error`           | 500         | An unexpected server error occurred.                             |
-| `service_unavailable`      | 503         | The server is temporarily unavailable.                           |
+#### Format
 
-### 6.2 Filter Operator Reference
+```
+GET /{resource}/summary            — summary metrics across the collection
+GET /{resource}/{metric-name}      — a specific metric (e.g., unread-count, balance)
+GET /{resource}/{id}/summary       — summary metrics scoped to one item
+```
+
+#### Rules
+
+1. Aggregate sub-resource endpoints **MUST** use `GET` (read-only, idempotent).
+2. `data` **MUST** be a flat object containing named metric fields — never an array of items.
+3. The full ByJSON response envelope (`data`, `error`, `meta`) **MUST** be used.
+4. Aggregate endpoints **MUST NOT** be considered "actions" for the purposes of the anti-collision rule in Section 3.1. Static path segments like `summary`, `count`, or `unread-count` that serve as aggregate endpoints are allowed at the collection level even if `GET /{resource}/{id}` also exists — provided `{id}` is a UUID (which is never ambiguous with a word segment).
+
+#### Examples
+
+`GET /reviews/pending-count`
+
+```json
+{
+  "data": { "pending_count": 12 },
+  "error": null,
+  "meta": { "request_id": "...", "timestamp": "..." }
+}
+```
+
+`GET /recipes/summary`
+
+```json
+{
+  "data": {
+    "total_recipes": 248,
+    "average_duration_minutes": 32,
+    "most_cooked_category": "main-course",
+    "recipes_added_this_week": 14
+  },
+  "error": null,
+  "meta": { "request_id": "...", "timestamp": "..." }
+}
+```
+
+`GET /recipes/stats`
+
+```json
+{
+  "data": {
+    "bookmarked": 37,
+    "published": 210,
+    "draft": 38
+  },
+  "error": null,
+  "meta": { "request_id": "...", "timestamp": "..." }
+}
+```
+
+---
+
+### 6.3 Offline-First Sync
+
+Many client applications (mobile, desktop) maintain a local database and need to synchronize state with the server — fetching changes, uploading locally-created records, and resolving conflicts. ByJSON defines the JSON payload contract for each sync pattern. **The server determines which patterns to support per endpoint and MUST document its choices.**
+
+**Guidance:**
+
+| Pattern | Use When |
+| --- | --- |
+| **Delta Sync (Pull)** | Client needs to fetch records that changed on the server since its last sync |
+| **Push Sync (Upload)** | Client needs to upload records created or modified while offline |
+| **Conflict Resolution** | Both client and server may modify the same record concurrently |
+| **Optimistic Locking** | Client must guarantee it's not overwriting a record that changed since it last read it |
+
+#### Delta Sync (Pull)
+
+The client fetches all records that changed on the server since a watermark timestamp. Architecturally distinct from pagination:
+
+| | Standard List | Delta Sync |
+| --- | --- | --- |
+| **Purpose** | Display paginated UI | Update a local offline database |
+| **Scope** | Current page of items | All changes since a watermark |
+| **Includes deletions?** | No | Yes — via tombstone records |
+| **Returns `pagination` meta?** | Yes | No — returns `server_time` instead |
+
+**URI format:**
+```
+GET /{resource}/sync
+GET /{resource}/{id}/sync
+```
+
+**Query parameters:**
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `since` | ISO 8601 | Watermark from the previous sync. If omitted, server **MAY** return a bounded historical window or **MUST** document its default behavior. |
+
+**Rules:**
+1. **MUST** use `GET` (read-only).
+2. Response **MUST** include all records updated **and** soft-deleted since `since`.
+3. Soft-deleted records **MUST** appear as tombstone objects with at minimum `id` and `"is_deleted": true`.
+4. `meta` **MUST** include `server_time` (ISO 8601). The client **MUST** use this as `since` in the next request — not its own local clock.
+5. **MUST NOT** use standard pagination. The full delta set is returned in one response.
+
+`GET /cooking-sessions/sync?since=2026-09-01T00:00:00Z`
+
+```json
+{
+  "data": [
+    { "id": "a1b2c3d4-...", "recipe_id": "9f1c2e3a-...", "duration_seconds": 1800, "updated_at": "2026-09-10T08:30:00Z", "is_deleted": false },
+    { "id": "e5f6a7b8-...", "is_deleted": true }
+  ],
+  "error": null,
+  "meta": { "request_id": "...", "timestamp": "...", "server_time": "2026-09-12T10:00:00Z" }
+}
+```
+
+#### Push Sync (Upload)
+
+The client uploads records that were created or modified locally while offline. The server processes each item and returns a per-item result.
+
+**URI format:**
+```
+POST /{resource}/sync
+```
+
+**Rules:**
+1. **MUST** use `POST`.
+2. Request body **MUST** contain an `items` array of records to upsert.
+3. Each item **MUST** include `id` (client-generated UUID), `updated_at`, and all writable fields.
+4. Response **SHOULD** use HTTP `207 Multi-Status` and return `succeeded` and `failed` arrays (same pattern as Bulk Operations in Section 5.2-H).
+5. `meta` **MUST** include `server_time`.
+
+`POST /cooking-sessions/sync`
+
+Request:
+```json
+{
+  "items": [
+    { "id": "a1b2c3d4-...", "recipe_id": "9f1c2e3a-...", "duration_seconds": 1800, "updated_at": "2026-09-11T07:00:00Z" },
+    { "id": "b2c3d4e5-...", "recipe_id": "8e0b1d2a-...", "duration_seconds": 900, "updated_at": "2026-09-11T08:00:00Z" }
+  ]
+}
+```
+
+Response (207):
+```json
+{
+  "data": {
+    "succeeded": [ { "id": "a1b2c3d4-..." } ],
+    "failed": [ { "id": "b2c3d4e5-...", "code": "conflict", "message": "Record was modified on the server." } ]
+  },
+  "error": null,
+  "meta": { "request_id": "...", "timestamp": "...", "server_time": "2026-09-13T09:00:00Z" }
+}
+```
+
+#### Conflict Resolution
+
+A conflict occurs when both the client and the server have modified the same record since the client last synced. ByJSON does not mandate a single resolution strategy, but **the server MUST document which strategy it uses per endpoint.**
+
+| Strategy | Description | When to Use |
+| --- | --- | --- |
+| **Server-Wins** | Server's version always prevails. Client changes are discarded. | Simple data where server is the source of truth (e.g., streaks, scores) |
+| **Client-Wins** | Client's version always prevails. Server version is overwritten. | Local-first personal data where user intent is paramount |
+| **Last-Write-Wins** | The version with the most recent `updated_at` timestamp wins. | General purpose; requires reliable client clocks |
+| **Manual Resolution** | Server returns `conflict` error; client must resolve and retry. | Critical data where no automatic resolution is acceptable |
+
+For **Manual Resolution**, the server **MUST** return HTTP `409 Conflict` with error code `conflict` and include the current server version of the record in the error `details`:
+
+```json
+{
+  "data": null,
+  "error": {
+    "code": "conflict",
+    "message": "This record was modified on the server since your last sync.",
+    "details": [
+      { "field": "server_version", "value": { "id": "a1b2-...", "title": "Server title", "updated_at": "2026-09-12T10:00:00Z" } }
+    ]
+  },
+  "meta": { "request_id": "...", "timestamp": "..." }
+}
+```
+
+#### Optimistic Locking
+
+Optimistic Locking prevents a client from overwriting a record that has changed on the server since the client last read it, without requiring explicit conflict resolution negotiation.
+
+The client includes the `updated_at` timestamp of the version it last read in the request. The server rejects the update if the record has since been modified.
+
+**Option A — `If-Unmodified-Since` header (HTTP standard):**
+```
+PATCH /cooking-sessions/{id}
+If-Unmodified-Since: 2026-09-10T08:30:00Z
+```
+Server returns `412 Precondition Failed` if the record has been modified after that timestamp.
+
+**Option B — `updated_at` field in request body:**
+```json
+{ "title": "New title", "updated_at": "2026-09-10T08:30:00Z" }
+```
+Server returns `409 Conflict` with code `conflict` if the stored `updated_at` does not match.
+
+The server **MUST** document which option is supported per endpoint. Option A is preferred for standard HTTP compliance.
+
+---
+
+### 6.4 Multi-Audience API (Namespace Separation)
+
+A ByJSON-compliant API may need to serve multiple audiences simultaneously — end-users, administrators, automated systems, or third-party partners. **The URI contract must not change based on who the caller is.** Authorization policy — not the URL structure — determines what data a caller may access.
+
+#### The Core Principle
+
+URIs identify **data entities**, not the perspective of the caller.
+
+```
+✅  GET /recipes   — identifies the recipes resource; authorization policy resolves what data is returned
+❌  GET /my-recipes vs GET /admin/all-recipes — different URIs for the same resource based on caller role
+```
+
+However, when different audiences require fundamentally different response schemas, security boundaries, or rate limits, namespace separation is a valid and recommended architectural pattern.
+
+#### Strategies
+
+#### Strategy 1: Authorization Scoping (Recommended for Single-Resource Servers)
+
+The same endpoint URI serves all audiences. The server's authorization layer determines what data is visible:
+
+- `GET /recipes` called by an **end-user** → returns only their own recipes (row-level policy)
+- `GET /recipes` called by an **admin** → returns all recipes, or allows filter by `?user_id=...`
+
+Server **MUST** document the role-dependent behavior of any endpoint that uses this strategy.
+
+#### Strategy 2: Hierarchical Ownership (Recommended for Explicit Multi-Owner Access)
+
+All resource access is explicit through the ownership hierarchy:
+
+```
+GET /users/{user_id}/recipes    — admin or owner accessing a specific user's recipes
+GET /users/me/recipes           — shorthand for the authenticated user's own recipes
+```
+
+This strategy is the most explicit and scales well to B2B, C2C, and multi-tenant scenarios.
+
+#### Strategy 3: Namespace Separation (Recommended for Distinct Audiences with Different Schemas)
+
+Separate URI namespaces for each audience:
+
+```
+GET /recipes                    — Consumer API (end-user, mobile, browser)
+GET /admin/recipes              — Backoffice API (admin panel, internal tools)
+GET /system/recipes             — Machine-to-machine, service integrations
+```
+
+Each namespace **MAY** have its own authentication mechanism, response schema, and rate limits. This is appropriate when the response shape differs significantly between audiences (e.g., admin responses include audit fields not relevant to end-users).
+
+#### The `/me` Convention
+
+The segment `me` is a **contextual alias** for `{user_id}` — it resolves to the authenticated caller's own identifier. Its use is subject to these rules:
+
+1. `me` **MUST** only be used as a substitute for a resource owner's identifier in a hierarchical URI (`/users/me`, `/users/me/recipes`).
+2. `me` **MUST NOT** be appended to collection-level singletons as a workaround for implicit scoping (e.g., `GET /cookbooks/me` is only appropriate if `GET /cookbooks/{user_id}` is also a valid endpoint).
+3. If `me` is supported, it **MUST** be applied consistently across all resources in the same namespace. Selective use of `me` on some endpoints and implicit JWT scoping on others creates an inconsistent contract.
+
+#### Audience-Based Design Decision Table
+
+| Scenario | Recommended Strategy |
+| --- | --- |
+| Single-owner app (no admin access to other users' data) | Strategy 1: Authorization Scoping |
+| Admin needs to access any user's data | Strategy 2: Hierarchical Ownership or Strategy 3: Namespace Separation |
+| B2B / multi-tenant (organizations own resources, users are members) | Strategy 2: Hierarchical Ownership (`/publishers/{id}/recipes`) |
+| C2C marketplace (same user is both creator and remixer) | Strategy 2: Hierarchical Ownership (`/users/{id}/recipes/as-creator`, `/users/{id}/recipes/as-remixer`) |
+| Different auth mechanisms or response schemas per audience | Strategy 3: Namespace Separation |
+
+---
+
+### 6.5 Idempotency Keys
+
+Network failures can cause a client to retry a `POST` request, resulting in duplicate data (e.g., a duplicate order, a duplicate payment). **Idempotency Keys** allow a client to safely retry without fear of duplication.
+
+#### Usage
+
+Clients **SHOULD** include an `Idempotency-Key` header on `POST` requests that are not naturally idempotent:
+
+```
+POST /recipes
+Idempotency-Key: a3e9b1c2-f345-4d67-8a90-b1c2d3e4f5a6
+Content-Type: application/json
+
+{ "title": "Nasi Goreng Spesial", "difficulty": "EASY", "duration_minutes": 15 }
+```
+
+#### Server Behavior
+
+1. Server **MUST** store the response of the first successful request keyed by the `Idempotency-Key` value for a minimum window of **24 hours**.
+2. If a second request arrives with the same key within that window, the server **MUST** return the stored response identically — including the same HTTP status code — without re-executing the operation.
+3. If a request arrives with the same key but a **different request body**, the server **MUST** return `409 Conflict` with error code `idempotency_key_conflict`.
+4. `Idempotency-Key` values **MUST** be UUIDs generated by the client.
+5. Idempotency-Key headers are **OPTIONAL** from the spec's perspective. Endpoints that require them **MUST** document this requirement explicitly.
+
+#### When to Use
+
+| Operation | Idempotency Key Recommended? |
+| --- | --- |
+| Create recipe / publish | ✅ Yes |
+| Send message | ✅ Yes |
+| Create resource (general POST) | Recommended |
+| Read (GET) | No — GET is already idempotent |
+| Update (PATCH / PUT) | No — already idempotent by nature if using absolute values |
+| Delete | Optional |
+
+---
+
+## 7. Reference Tables
+
+### 7.1 Error Code Reference
+
+| Error Code                    | HTTP Status | Description                                                                    |
+| ----------------------------- | ----------- | ------------------------------------------------------------------------------ |
+| `bad_request`                 | 400         | The request body is malformed JSON and cannot be parsed.                       |
+| `validation_error`            | 422         | The request data failed validation rules. See `details`.                       |
+| `unauthorized`                | 401         | Authentication is required or the token has expired.                           |
+| `forbidden`                   | 403         | The authenticated user does not have permission.                               |
+| `not_found`                   | 404         | The requested resource does not exist.                                         |
+| `method_not_allowed`          | 405         | The HTTP method is not supported for this endpoint.                            |
+| `conflict`                    | 409         | The request conflicts with the current state of the resource.                  |
+| `idempotency_key_conflict`    | 409         | An `Idempotency-Key` was reused with a different request body. See Section 6.5. |
+| `file_not_ready`              | 409         | File cannot be attached because its `status` is not `completed`.               |
+| `upload_url_expired`          | 410         | The `upload_url` has passed its `expires_at` timestamp.                        |
+| `file_too_large`              | 422         | `size_bytes` exceeds the limit for the given `purpose`.                        |
+| `unsupported_file_type`       | 422         | `content_type` is not allowed for the given `purpose`.                         |
+| `purpose_required`            | 422         | `purpose` is required but was not provided.                                    |
+| `file_verification_failed`    | 409         | Server could not find the file in storage during completion.                   |
+| `too_many_requests`           | 429         | The client has exceeded the rate limit. Check `meta.retry_after`.              |
+| `endpoint_deprecated`         | 200 / 4xx   | The endpoint is deprecated. Check `meta.deprecation` for the replacement.      |
+| `internal_error`              | 500         | An unexpected server error occurred.                                           |
+| `service_unavailable`         | 503         | The server is temporarily unavailable. Check `meta.retry_after`.               |
+
+### 7.2 Filter Operator Reference
 
 These operators are used inside LHS Brackets for advanced filtering (e.g., `field[operator]=value`).
 
@@ -911,15 +1375,18 @@ _Note 1:_ For simple equality checks, you may omit the bracket notation entirely
 
 _Note 2:_ For the `in` operator, if a value itself contains a comma, it **MUST** be URL-encoded (e.g., `Washington%2CD.C.`). Alternatively, the server **MAY** support repeated keys (e.g., `city[in]=Washington, D.C.&city[in]=New York`).
 
-### 6.3 Meta Object Specification
+### 7.3 Meta Object Specification
 
 The `meta` object is present in every response.
 
-| Field        | Type     | Required | Description                                                                                                                                            |
-| ------------ | -------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `request_id` | `string` | **Yes**  | A UUID identifier for the request, useful for debugging and tracing.                                                                                   |
-| `timestamp`  | `string` | **Yes**  | ISO 8601 timestamp of when the server processed the request.                                                                                           |
-| `pagination` | `object` | No       | Present only in paginated collections. The schema varies based on the strategy (offset vs cursor). See [Section 4.2-C](#c-collection-with-pagination). |
+| Field         | Type      | Required | Description                                                                                                                                                                              |
+| ------------- | --------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `request_id`  | `string`  | **Yes**  | A UUID identifier for the request, useful for debugging and tracing.                                                                                                                     |
+| `timestamp`   | `string`  | **Yes**  | ISO 8601 timestamp of when the server processed the request.                                                                                                                             |
+| `pagination`  | `object`  | No       | Present only in paginated collections. The schema varies based on the strategy (offset vs cursor). See [Section 5.2-C](#c-collection-with-pagination).                                   |
+| `server_time` | `string`  | No       | ISO 8601 timestamp of the server's authoritative clock. **MUST** be included in all Offline-First Sync responses (Section 6.3). The client **MUST** use this as `since` in the next request. |
+| `retry_after` | `integer` | No       | Seconds the client should wait before retrying. **MUST** be included in `429 Too Many Requests` and `503 Service Unavailable` responses.                                                 |
+| `deprecation` | `object`  | No       | Present when the endpoint is deprecated. Contains `sunset_date` (ISO 8601) and `successor` (URI of the replacement endpoint).                                                            |
 
 ## License
 
