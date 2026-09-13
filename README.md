@@ -105,6 +105,8 @@ _Note: URL versioning (e.g., `/v1/`) is **RECOMMENDED** but falls outside the sc
 
 Resource URLs **MUST** use plural nouns and **MUST** use kebab-case for multi-word segments.
 
+For domain concepts that are grammatically uncountable (mass nouns such as *cooking*, *music*, *audio*, *equipment*, *feedback*), the collection **MUST** use the plural form of the discrete countable entity representing the item (e.g. `/cooking-sessions`, `/tracks`, `/equipment-items`, `/reviews`). The API **MUST NOT** use singular mass nouns (e.g. `/cooking`, `/music`, `/audio`) or invented plurals (e.g. `/cookings`, `/musics`, `/feedbacks`).
+
 #### Ownership & Hierarchy
 
 If a resource belongs to a parent entity, its URI **SHOULD** reflect that ownership through nesting:
