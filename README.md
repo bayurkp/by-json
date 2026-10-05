@@ -374,29 +374,52 @@ Every ByJSON response envelope — success or failure — **MUST** contain exact
 Because `success` is a boolean literal, ByJSON maps cleanly to a **Discriminated Union** in TypeScript and typed languages without runtime guessing:
 
 ```typescript
-export type ByJsonResponse<T> =
+export interface ApiMeta {
+  requestId: string;
+  timestamp: string;
+  pagination?: {
+    type: "offset" | "cursor";
+    perPage: number;
+    hasNext: boolean;
+    hasPrev: boolean;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
+export interface ApiError {
+  code: string;
+  message: string;
+  details?: Array<{
+    field: string;
+    code: string;
+    message: string;
+  }>;
+}
+
+export type ApiResponse<T> =
   | {
       success: true;
       data: T;
       error: null;
-      meta: ByJsonMeta;
+      meta: ApiMeta;
     }
   | {
       success: false;
       data: null;
-      error: ByJsonError;
-      meta: ByJsonMeta;
+      error: ApiError;
+      meta: ApiMeta;
     };
 
 // Ergonomic usage:
-const response: ByJsonResponse<Recipe> = await api.getRecipe(1);
+const response: ApiResponse<Recipe> = await api.getRecipe(1);
 
 if (response.success) {
   // TypeScript automatically narrows:
   // response.data is Recipe (not null!)
   console.log(response.data.title);
 } else {
-  // response.error is ByJsonError (not null!)
+  // response.error is ApiError (not null!)
   console.error(response.error.message);
 }
 ```
